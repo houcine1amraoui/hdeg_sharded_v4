@@ -10,6 +10,7 @@ with open("configs/config.yaml") as f:
 from src.utils.get_folders_utils import get_dataset_path
 
 path = Path(get_dataset_path(config))
+print(f"Reading {path}...")
 
 with path.open("r", encoding="utf-8-sig", newline="") as f:
     headers = next(csv.reader(f))
