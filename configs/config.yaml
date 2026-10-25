@@ -7,7 +7,7 @@ seed: 42
 preprocessing:
   dataset_folder: data
   merge_bre_cu: false # true or false
-  dataset_name: CU # CU or BRE
+  dataset_name: BRE # CU or BRE
   apply_filtering: true
   apply_cleaning: true # should be true for CU because it has NaN column
   downsample_freq: 1s
