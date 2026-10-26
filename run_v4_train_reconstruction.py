@@ -13,6 +13,32 @@ from src.scientific_validation.reconstruction.runtime import (
     require, sha, write, load_config, settings, configure_device, new_output, source_hashes, check_sources, evaluate)
 
 
+
+def verify_encoder_migration_state(model, reference):
+    """Weights/buffers must migrate exactly; forward arithmetic need not be bitwise identical."""
+    migrated = {k: v for k, v in model.state_dict().items() if not k.startswith('reconstructor.')}
+    original = {k: v for k, v in reference.state_dict().items() if not k.startswith('hbf.')}
+    require(set(migrated) == set(original), 'Migrated encoder state keys differ')
+    for key in original:
+        require(migrated[key].shape == original[key].shape and
+                migrated[key].dtype == original[key].dtype and
+                torch.equal(migrated[key], original[key]), 'Migrated encoder state differs: ' + key)
+
+
+def migration_output_diagnostic(actual, expected, atol=1e-5, rtol=1e-5):
+    require(actual.shape == expected.shape, 'Migration output shape differs')
+    finite = bool(torch.isfinite(actual).all() and torch.isfinite(expected).all())
+    if not finite:
+        return dict(passed=False, finite=False, atol=atol, rtol=rtol,
+                    max_abs_error=None, mean_abs_error=None, outside_tolerance=None, bitwise_equal=False)
+    error = (actual.detach().double() - expected.detach().double()).abs()
+    limit = atol + rtol * expected.detach().double().abs()
+    outside = int((error > limit).sum().item())
+    return dict(passed=outside == 0, finite=True, atol=atol, rtol=rtol,
+                max_abs_error=float(error.max()), mean_abs_error=float(error.mean()),
+                outside_tolerance=outside, bitwise_equal=torch.equal(actual, expected))
+
+
 def run(args, config, out, report):
     opts = settings(config); device = configure_device(config,args.device)
     parent = json.loads(args.training_report.read_text()); root = args.training_report.parent
@@ -44,13 +70,18 @@ def run(args, config, out, report):
     saved=json.loads((root/'reconstruction_encoder_final.json').read_text())['update']['records']
     from src.models.hdeg.bre_hierarchy import BREHierarchy
     reference=BREHierarchy(old_cfg,semantics).to(device);reference.load_state_dict(checkpoint['model'],strict=True);reference.eval()
+    verify_encoder_migration_state(model,reference)
+    report['encoder_state_migration_exact']=True
+    report['same_device_migration_checks']=[]
     migration_error=0.;representation_replay_error=0.
     with np.load(root/'update_encoder_final_representations.npz',allow_pickle=False) as reps,torch.no_grad():
         for start in range(0,32,8):
             b=window_batch(ds,updates[start:start+8]);result=model(torch.from_numpy(b['X']).to(device))
             reference_reps=reference.encode(torch.from_numpy(b['X']).to(device))
             for k in LEVELS:
-                require(torch.equal(result['representations'][k],reference_reps[k]),'Same-device migration differs')
+                diagnostic=migration_output_diagnostic(result['representations'][k],reference_reps[k])
+                report['same_device_migration_checks'].append(dict(batch_start=start,level=k,**diagnostic))
+                require(diagnostic['passed'], 'Same-device migration exceeds tolerance: '+k+' '+json.dumps(diagnostic))
                 a=result['representations'][k].cpu().numpy()
                 representation_replay_error=max(representation_replay_error,float(np.max(abs(a-reps['X_'+k][start:start+8]))))
                 require(np.allclose(a,reps['X_'+k][start:start+8],atol=1e-5,rtol=1e-5),'Saved encoder replay differs beyond CPU/CUDA tolerance')
@@ -107,7 +138,7 @@ def run(args, config, out, report):
     val_summary,val_score=evaluate(model,val,validation,device,opts['batch_size'],mean,opts['fusion_weights'],out/'validation_scores')
     ds.verify_unchanged();val.verify_unchanged();check_sources(dependencies)
     deltas={name:float(sum((v.detach().cpu().double()-initial[k].double()).square().sum() for k,v in model.named_parameters() if k.startswith(name+'.')).sqrt()) for name in ('dbrl','bse','bil','ebrl','reconstructor')}
-    report.update(status='COMPLETE',settings=opts,device=str(device),parent_report_sha256=sha(args.training_report),migration_replay_max_error=migration_error,representation_replay_max_error=representation_replay_error,same_device_encoder_migration_exact=True,
+    report.update(status='COMPLETE',settings=opts,device=str(device),parent_report_sha256=sha(args.training_report),migration_replay_max_error=migration_error,representation_replay_max_error=representation_replay_error,same_device_encoder_migration_exact=all(v['bitwise_equal'] for v in report['same_device_migration_checks']),same_device_encoder_migration_within_tolerance=True,
         input_manifest_sha256=ds.manifest_sha256,parameter_delta_l2=deltas,update_before=before,update_after=train_summary,
         calibration=cal_summary,validation=val_summary,threshold=threshold,calibration_exceedance_fraction=float(np.mean(cal_score>threshold)),
         validation_exceedance_fraction=float(np.mean(val_score>threshold)),checkpoint_sha256=sha(out/'reconstruction_checkpoint.pt'),
