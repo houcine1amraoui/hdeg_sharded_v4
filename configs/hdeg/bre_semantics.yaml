@@ -1,0 +1,16 @@
+schema_version: bre_semantics_v1
+dataset: BRE
+interpretation: Measurement-grounded latent state groups, not annotated human activities.
+states:
+  - {id: contact_state, measurement: contact}
+  - {id: motion_activity, measurement: motion}
+  - {id: thermal_environment, measurement: temperature}
+  - {id: humidity_environment, measurement: humidity}
+  - {id: ambient_illumination, measurement: illuminance}
+interaction_policy: Exploratory contextual hypotheses; not causal or empirically validated edges.
+# Directed source -> target. No reverse edges or self-loops are added implicitly.
+edges:
+  - [contact_state, motion_activity]
+  - [motion_activity, ambient_illumination]
+  - [thermal_environment, humidity_environment]
+  - [humidity_environment, thermal_environment]
